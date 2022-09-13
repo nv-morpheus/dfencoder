@@ -715,7 +715,7 @@ class AutoEncoder(torch.nn.Module):
             i_loss = bce_loss[:, i]
             self.feature_loss_stats[ft] = self._create_stat_dict(i_loss)
         for i, ft in enumerate(self.categorical_fts):
-            i_loss = cce_loss[i]
+            i_loss = cce_loss[:, i]
             self.feature_loss_stats[ft] = self._create_stat_dict(i_loss)
 
     def train_epoch(self, n_updates, input_df, df, pbar=None):
