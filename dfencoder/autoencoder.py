@@ -1102,16 +1102,16 @@ class AutoEncoder(torch.nn.Module):
             output_df = self.decode_to_df(x, df=df)
 
         # mse2, bce2, cce2, _ = self.get_anomaly_score_with_losses(df)
-        # mse_scaled2, bce_scaled2, cce_scaled2 = self.get_scaled_anomaly_scores(df)
+        mse_scaled2, bce_scaled2, cce_scaled2 = self.get_scaled_anomaly_scores_OLD(df)
+
+        cce_scaled2 = torch.cat([x.data.reshape(-1, 1) for x in cce_scaled2], dim=1)
 
         mse, bce, cce = self.get_anomaly_score_losses(df)
         mse_scaled, bce_scaled, cce_scaled = self.scale_losses(mse, bce, cce)
 
-        # assert torch.all((mse_scaled.cpu() - mse_scaled2) == 0.0)
-        # assert torch.all((bce_scaled.cpu() - bce_scaled2) == 0.0)
-
-        # for i, ft in enumerate(self.categorical_fts):
-        #     assert torch.all((cce_scaled[:, i] - cce_scaled2[i]) == 0.0)
+        assert compare_tensors(mse_scaled2, mse_scaled)
+        assert compare_tensors(bce_scaled2, bce_scaled)
+        assert compare_tensors(cce_scaled2, cce_scaled)
 
         if (return_abs):
             mse_scaled = abs(mse_scaled)
