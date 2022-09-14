@@ -1,3 +1,5 @@
+import typing
+
 import numpy as np
 import torch
 from sklearn.preprocessing import QuantileTransformer
@@ -18,16 +20,26 @@ class StandardScaler(object):
         if (self.std == 0):
             self.std = 1.0
 
-    def transform(self, x: torch.Tensor):
+    def transform(self, x: typing.Union[torch.Tensor, np.ndarray]):
 
-        # result = x.astype(float)
-        result = x.to(dtype=torch.float32, copy=True)
+        # Ensure we are in the right floating point format
+        if (isinstance(x, torch.Tensor)):
+            result = x.to(dtype=torch.float32, copy=True)
+        elif (isinstance(x, np.ndarray)):
+            result = x.astype(float)
+
         result -= self.mean
         result /= self.std
         return result
 
     def inverse_transform(self, x: torch.Tensor):
-        result = x.to(dtype=torch.float32, copy=True)
+
+        # Ensure we are in the right floating point format
+        if (isinstance(x, torch.Tensor)):
+            result = x.to(dtype=torch.float32, copy=True)
+        elif (isinstance(x, np.ndarray)):
+            result = x.astype(float)
+
         result *= self.std
         result += self.mean
         return result

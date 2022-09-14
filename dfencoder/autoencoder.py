@@ -895,7 +895,7 @@ class AutoEncoder(torch.nn.Module):
         bce_loss = self.bce(bin, bin_target)
         bce_scaled = torch.zeros(bce_loss.shape)
         for i, ft in enumerate(self.binary_fts):
-            bce_scaled[:, i] = torch.tensor(self.feature_loss_stats[ft]['scaler'].transform(mse_loss[:, i]))
+            bce_scaled[:, i] = torch.tensor(self.feature_loss_stats[ft]['scaler'].transform(bce_loss[:, i]))
         cce_scaled = []
         for i, ft in enumerate(self.categorical_fts):
             loss = torch.tensor(self.feature_loss_stats[ft]['scaler'].transform(self.cce(cat[i], codes[i])))
@@ -975,7 +975,7 @@ class AutoEncoder(torch.nn.Module):
             num, bin, embeddings = self.encode_input(data)
             x = torch.cat(num + bin + embeddings, dim=1)
             x = self.encode(x)
-            output_df = self.decode_to_df(x, df=df)
+            output_df = self.decode_to_df(x)
         mse, bce, cce, _ = self.get_anomaly_score_with_losses_OLD(df)
         mse_scaled, bce_scaled, cce_scaled = self.get_scaled_anomaly_scores_OLD(df)
         for i, ft in enumerate(self.numeric_fts):
@@ -1089,8 +1089,7 @@ class AutoEncoder(torch.nn.Module):
         return mse_scaled2, bce_scaled2, cce_scaled2
 
     def get_results(self, df, return_abs=False):
-        pdf = df.copy()
-        orig_cols = pdf.columns
+        pdf = pd.DataFrame()
         self.eval()
 
         data = self.prepare_df(df)
@@ -1099,7 +1098,7 @@ class AutoEncoder(torch.nn.Module):
             num, bin, embeddings = self.encode_input(data)
             x = torch.cat(num + bin + embeddings, dim=1)
             x = self.encode(x)
-            output_df = self.decode_to_df(x, df=df)
+            output_df = self.decode_to_df(x)
 
         # mse2, bce2, cce2, _ = self.get_anomaly_score_with_losses(df)
         mse_scaled2, bce_scaled2, cce_scaled2 = self.get_scaled_anomaly_scores_OLD(df)
@@ -1121,36 +1120,27 @@ class AutoEncoder(torch.nn.Module):
         combined_loss = torch.cat([mse_scaled, bce_scaled, cce_scaled], dim=1)
 
         for i, ft in enumerate(self.numeric_fts):
+            pdf[ft] = df[ft]
             pdf[ft + '_pred'] = output_df[ft]
             pdf[ft + '_loss'] = mse[:, i].cpu().numpy()
             pdf[ft + '_z_loss'] = mse_scaled[:, i].cpu().numpy()
 
         for i, ft in enumerate(self.binary_fts):
+            pdf[ft] = df[ft]
             pdf[ft + '_pred'] = output_df[ft]
-            pdf[ft + '_loss'] = bce[:, i].cpu().numpy().cpu().numpy()
-            pdf[ft + '_z_loss'] = bce_scaled[:, i]
+            pdf[ft + '_loss'] = bce[:, i].cpu().numpy()
+            pdf[ft + '_z_loss'] = bce_scaled[:, i].cpu().numpy()
 
         for i, ft in enumerate(self.categorical_fts):
+            pdf[ft] = df[ft]
             pdf[ft + '_pred'] = output_df[ft]
             pdf[ft + '_loss'] = cce[:, i].cpu().numpy()
             pdf[ft + '_z_loss'] = cce_scaled[:, i].cpu().numpy()
 
-        all_cols = [[c, c + '_pred', c + '_loss', c + '_z_loss'] for c in orig_cols]
-        result_cols = [col for col_collection in all_cols for col in col_collection]
-
-        z_losses = [c + '_z_loss' for c in orig_cols]
-
         pdf['max_abs_z'] = combined_loss.max(dim=1)[0].cpu().numpy()
         pdf['mean_abs_z'] = combined_loss.mean(dim=1).cpu().numpy()
 
-        result_cols.append('max_abs_z')
-        result_cols.append('mean_abs_z')
-
-        before = self.get_results_OLD(df, return_abs=return_abs)
-
-        result = pdf[result_cols]
-
-        return result
+        return pdf
 
 
 def compare_tensors(left, right) -> bool:
