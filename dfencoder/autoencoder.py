@@ -996,6 +996,9 @@ class AutoEncoder(torch.nn.Module):
             x = torch.cat(num + bin + embeddings, dim=1)
             x = self.encode(x)
             output_df = self.decode_to_df(x)
+            
+        # set the index of the prediction df to match the input df    
+        output_df.index = df.index
 
         mse, bce, cce = self.get_anomaly_score_losses(df)
         mse_scaled, bce_scaled, cce_scaled = self.scale_losses(mse, bce, cce)
