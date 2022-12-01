@@ -27,6 +27,8 @@ class StandardScaler(object):
             result = x.to(dtype=torch.float32, copy=True)
         elif (isinstance(x, np.ndarray)):
             result = x.astype(float)
+        else:
+            raise ValueError(f"Unsupported type: {type(x)}")
 
         result -= self.mean
         result /= self.std
