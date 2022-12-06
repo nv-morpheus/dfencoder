@@ -54,7 +54,7 @@ import tqdm
 
 from .dataframe import EncoderDataFrame
 from .logging import BasicLogger, IpynbLogger, TensorboardXLogger
-from .scalers import GaussRankScaler, NullScaler, StandardScaler
+from .scalers import GaussRankScaler, NullScaler, StandardScaler, ModifiedScaler
 
 
 def ohe(input_vector, dim, device="cpu"):
@@ -164,8 +164,9 @@ class AutoEncoder(torch.nn.Module):
                  run=None,
                  progress_bar=True,
                  n_megabatches=1,
-                 scaler='standard',
+                 numerical_feat_scaler='standard',
                  preset_cats=None,
+                 loss_scaler='standard', 
                  *args,
                  **kwargs):
         super(AutoEncoder, self).__init__(*args, **kwargs)
@@ -225,12 +226,21 @@ class AutoEncoder(torch.nn.Module):
         self.run = run
         self.project_embeddings = project_embeddings
 
-        self.scaler = scaler
+        self.numerical_feat_scaler = numerical_feat_scaler
+        # scaler class used to scale losses and collect loss stats
+        self.loss_scaler_str = loss_scaler
+        self.loss_scaler = self.get_scaler(loss_scaler)
 
         self.n_megabatches = n_megabatches
 
     def get_scaler(self, name):
-        scalers = {'standard': StandardScaler, 'gauss_rank': GaussRankScaler, None: NullScaler, 'none': NullScaler}
+        scalers = {
+            'standard': StandardScaler, 
+            'gauss_rank': GaussRankScaler, 
+            'modified': ModifiedScaler,
+            None: NullScaler, 
+            'none': NullScaler
+        }
         return scalers[name]
 
     def init_numeric(self, df):
@@ -239,10 +249,10 @@ class AutoEncoder(torch.nn.Module):
         numeric += list(dt[dt == int].index)
         numeric += list(dt[dt == float].index)
 
-        if isinstance(self.scaler, str):
-            scalers = {ft: self.scaler for ft in numeric}
-        elif isinstance(self.scaler, dict):
-            scalers = self.scaler
+        if isinstance(self.numerical_feat_scaler, str):
+            scalers = {ft: self.numerical_feat_scaler for ft in numeric}
+        elif isinstance(self.numerical_feat_scaler, dict):
+            scalers = self.numerical_feat_scaler
 
         for ft in numeric:
             Scaler = self.get_scaler(scalers.get(ft, 'gauss_rank'))
@@ -621,11 +631,9 @@ class AutoEncoder(torch.nn.Module):
         return net_loss
 
     def _create_stat_dict(self, a):
-        scaler = StandardScaler()
+        scaler = self.loss_scaler()
         scaler.fit(a)
-        mean = scaler.mean
-        std = scaler.std
-        return {'scaler': scaler, 'mean': mean, 'std': std}
+        return scaler
 
     def fit(self, df, epochs=1, val=None):
         """Does training."""
@@ -975,13 +983,13 @@ class AutoEncoder(torch.nn.Module):
         cce_scaled = torch.zeros_like(cce)
 
         for i, ft in enumerate(self.numeric_fts):
-            mse_scaled[:, i] = self.feature_loss_stats[ft]['scaler'].transform(mse[:, i])
+            mse_scaled[:, i] = self.feature_loss_stats[ft].transform(mse[:, i])
 
         for i, ft in enumerate(self.binary_fts):
-            bce_scaled[:, i] = self.feature_loss_stats[ft]['scaler'].transform(bce[:, i])
+            bce_scaled[:, i] = self.feature_loss_stats[ft].transform(bce[:, i])
 
         for i, ft in enumerate(self.categorical_fts):
-            cce_scaled[:, i] = self.feature_loss_stats[ft]['scaler'].transform(cce[:, i])
+            cce_scaled[:, i] = self.feature_loss_stats[ft].transform(cce[:, i])
 
         return mse_scaled, bce_scaled, cce_scaled
 
@@ -1014,21 +1022,21 @@ class AutoEncoder(torch.nn.Module):
             pdf[ft] = df[ft]
             pdf[ft + '_pred'] = output_df[ft]
             pdf[ft + '_loss'] = mse[:, i].cpu().numpy()
-            pdf[ft + '_z_loss'] = mse_scaled[:, i].cpu().numpy()
+            pdf[ft + '_scaled_loss'] = mse_scaled[:, i].cpu().numpy()
 
         for i, ft in enumerate(self.binary_fts):
             pdf[ft] = df[ft]
             pdf[ft + '_pred'] = output_df[ft]
             pdf[ft + '_loss'] = bce[:, i].cpu().numpy()
-            pdf[ft + '_z_loss'] = bce_scaled[:, i].cpu().numpy()
+            pdf[ft + '_scaled_loss'] = bce_scaled[:, i].cpu().numpy()
 
         for i, ft in enumerate(self.categorical_fts):
             pdf[ft] = df[ft]
             pdf[ft + '_pred'] = output_df[ft]
             pdf[ft + '_loss'] = cce[:, i].cpu().numpy()
-            pdf[ft + '_z_loss'] = cce_scaled[:, i].cpu().numpy()
+            pdf[ft + '_scaled_loss'] = cce_scaled[:, i].cpu().numpy()
 
-        pdf['max_abs_z'] = combined_loss.max(dim=1)[0].cpu().numpy()
-        pdf['mean_abs_z'] = combined_loss.mean(dim=1).cpu().numpy()
+        pdf['max_abs_scaled_loss'] = combined_loss.max(dim=1)[0].cpu().numpy()
+        pdf['mean_abs_scaled_loss'] = combined_loss.mean(dim=1).cpu().numpy()
 
         return pdf
