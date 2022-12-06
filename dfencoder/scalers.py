@@ -4,6 +4,14 @@ import numpy as np
 import torch
 from sklearn.preprocessing import QuantileTransformer
 
+def ensure_float_type(x: typing.Union[torch.Tensor, np.ndarray]):
+    """Ensure we are in the right floating point format. """
+    if (isinstance(x, torch.Tensor)):
+        result = x.to(dtype=torch.float32, copy=True)
+    elif (isinstance(x, np.ndarray)):
+        result = x.astype(float)
+    return result
+
 
 class StandardScaler(object):
     """Impliments standard (mean/std) scaling."""
@@ -21,27 +29,57 @@ class StandardScaler(object):
             self.std = 1.0
 
     def transform(self, x: typing.Union[torch.Tensor, np.ndarray]):
-
-        # Ensure we are in the right floating point format
-        if (isinstance(x, torch.Tensor)):
-            result = x.to(dtype=torch.float32, copy=True)
-        elif (isinstance(x, np.ndarray)):
-            result = x.astype(float)
-
+        result = ensure_float_type(x)
         result -= self.mean
         result /= self.std
         return result
 
     def inverse_transform(self, x: torch.Tensor):
-
-        # Ensure we are in the right floating point format
-        if (isinstance(x, torch.Tensor)):
-            result = x.to(dtype=torch.float32, copy=True)
-        elif (isinstance(x, np.ndarray)):
-            result = x.astype(float)
-
+        result = ensure_float_type(x)
         result *= self.std
         result += self.mean
+        return result
+
+    def fit_transform(self, x: torch.Tensor):
+        self.fit(x)
+        return self.transform(x)
+
+class ModifiedScaler(object):
+    """Implements scaling using modified z score."""
+
+    def __init__(self):
+        self.median = None
+        self.mad = None # median absolute deviation
+        self.meanad = None # mean absolute deviation
+
+    def fit(self, x: torch.Tensor):
+        med = x.median().item()
+        self.median = med
+        self.mad = (x - med).abs().median().item()
+        self.meanad = (x - med).abs().mean().item()
+        # Having a meanad == 0 (when all values are the same), breaks training. Just use 1.0 in this case
+        if (self.meanad == 0):
+            self.meanad = 1.0
+
+    def transform(self, x: typing.Union[torch.Tensor, np.ndarray]):
+        result = ensure_float_type(x)
+
+        # reference: https://www.ibm.com/docs/el/cognos-analytics/11.1.0?topic=terms-modified-z-score
+        result -= self.median
+        if self.mad == 0:
+            result /= (1.253314 * self.meanad)
+        else:
+            result /= (1.486 * self.mad)  # 1.486 * mad approximately equals the standard deviation
+        return result
+
+    def inverse_transform(self, x: torch.Tensor):
+        result = ensure_float_type(x)
+
+        if self.mad == 0:
+            result *= (1.253314 * self.meanad)
+        else:
+            result *= (1.486 * self.mad)
+        result += self.median
         return result
 
     def fit_transform(self, x: torch.Tensor):
