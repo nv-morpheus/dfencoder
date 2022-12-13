@@ -635,20 +635,44 @@ class AutoEncoder(torch.nn.Module):
         scaler.fit(a)
         return scaler
 
-    def fit(self, df, epochs=1, val=None):
-        """Does training."""
-        pdf = df.copy()
-        # if val is None:
-        #     pdf_val = None
-        # else:
-        #     pdf_val = val.copy()
+    def fit(
+        self, df, epochs=1, val=None, run_validation=False, use_val_for_loss_stats=False
+    ):
+        """Does training.
+        Args:
+            df: pandas df used for training
+            epochs: number of epochs to run training
+            val: optional pandas dataframe for validation or loss stats
+            run_validation: boolean indicating whether to collect validation loss for each 
+                epoch during training
+            use_val_for_loss_stats: boolean indicating whether to use the validation set 
+                for loss statistics collection (for z score calculation)
+
+        Raises:
+            ValueError: 
+                if run_validation or use_val_for_loss_stats is True but val is not provided
+        """
+        if (run_validation or use_val_for_loss_stats) and val is None:
+            raise ValueError(
+                "Validation set is required if either run_validation or \
+                use_val_for_loss_stats is set to True."
+            )
+
+        if use_val_for_loss_stats:
+            df_for_loss_stats = val.copy()
+        else:
+            # use train loss
+            df_for_loss_stats = df.copy()
+
+        if run_validation and val is not None:
+            val = val.copy()
 
         if self.optim is None:
             self.build_model(df)
         if self.n_megabatches == 1:
             df = self.prepare_df(df)
 
-        if val is not None:
+        if run_validation and val is not None:
             val_df = self.prepare_df(val)
             val_in = val_df.swap(likelihood=self.swap_p)
             msg = "Validating during training.\n"
@@ -679,7 +703,7 @@ class AutoEncoder(torch.nn.Module):
             if self.lr_decay is not None:
                 self.lr_decay.step()
 
-            if val is not None:
+            if run_validation and val is not None:
                 self.eval()
                 with torch.no_grad():
                     swapped_loss = []
@@ -720,7 +744,7 @@ class AutoEncoder(torch.nn.Module):
 
         #Getting training loss statistics
         # mse_loss, bce_loss, cce_loss, _ = self.get_anomaly_score(pdf) if pdf_val is None else self.get_anomaly_score(pd.concat([pdf, pdf_val]))
-        mse_loss, bce_loss, cce_loss, _ = self.get_anomaly_score_with_losses(pdf)
+        mse_loss, bce_loss, cce_loss, _ = self.get_anomaly_score_with_losses(df_for_loss_stats)
         for i, ft in enumerate(self.numeric_fts):
             i_loss = mse_loss[:, i]
             self.feature_loss_stats[ft] = self._create_stat_dict(i_loss)
