@@ -10,6 +10,8 @@ def ensure_float_type(x: typing.Union[torch.Tensor, np.ndarray]):
         result = x.to(dtype=torch.float32, copy=True)
     elif (isinstance(x, np.ndarray)):
         result = x.astype(float)
+    else:
+        raise ValueError(f"Unsupported type: {type(x)}")
     return result
 
 
