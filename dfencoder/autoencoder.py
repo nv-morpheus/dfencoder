@@ -723,13 +723,13 @@ class AutoEncoder(torch.nn.Module):
         mse_loss, bce_loss, cce_loss, _ = self.get_anomaly_score_with_losses(pdf)
         for i, ft in enumerate(self.numeric_fts):
             i_loss = mse_loss[:, i]
-            self.feature_loss_stats[ft]['scaler'] = self._create_stat_dict(i_loss)
+            self.feature_loss_stats[ft] = self._create_stat_dict(i_loss)
         for i, ft in enumerate(self.binary_fts):
             i_loss = bce_loss[:, i]
-            self.feature_loss_stats[ft]['scaler'] = self._create_stat_dict(i_loss)
+            self.feature_loss_stats[ft] = self._create_stat_dict(i_loss)
         for i, ft in enumerate(self.categorical_fts):
             i_loss = cce_loss[:, i]
-            self.feature_loss_stats[ft]['scaler'] = self._create_stat_dict(i_loss)
+            self.feature_loss_stats[ft] = self._create_stat_dict(i_loss)
 
     def train_epoch(self, n_updates, input_df, df, pbar=None):
         """Run regular epoch."""
@@ -983,13 +983,13 @@ class AutoEncoder(torch.nn.Module):
         cce_scaled = torch.zeros_like(cce)
 
         for i, ft in enumerate(self.numeric_fts):
-            mse_scaled[:, i] = self.feature_loss_stats[ft].transform(mse[:, i])
+            mse_scaled[:, i] = self.feature_loss_stats[ft]['scaler'].transform(mse[:, i])
 
         for i, ft in enumerate(self.binary_fts):
-            bce_scaled[:, i] = self.feature_loss_stats[ft].transform(bce[:, i])
+            bce_scaled[:, i] = self.feature_loss_stats[ft]['scaler'].transform(bce[:, i])
 
         for i, ft in enumerate(self.categorical_fts):
-            cce_scaled[:, i] = self.feature_loss_stats[ft].transform(cce[:, i])
+            cce_scaled[:, i] = self.feature_loss_stats[ft]['scaler'].transform(cce[:, i])
 
         return mse_scaled, bce_scaled, cce_scaled
 
