@@ -47,12 +47,16 @@ class StandardScaler(object):
         return self.transform(x)
 
 class ModifiedScaler(object):
-    """Implements scaling using modified z score."""
+    """Implements scaling using modified z score.
+    Reference: https://www.ibm.com/docs/el/cognos-analytics/11.1.0?topic=terms-modified-z-score
+    """
+    MAD_SCALING_FACTOR = 1.486  # 1.486 * MAD approximately equals the standard deviation
+    MEANAD_SCALING_FACTOR = 1.253314  # 1.253314 * MeanAD approximately equals the standard deviation
 
     def __init__(self):
-        self.median = None
-        self.mad = None # median absolute deviation
-        self.meanad = None # mean absolute deviation
+        self.median: float = None
+        self.mad: float = None # median absolute deviation
+        self.meanad: float = None # mean absolute deviation
 
     def fit(self, x: torch.Tensor):
         med = x.median().item()
@@ -66,21 +70,20 @@ class ModifiedScaler(object):
     def transform(self, x: typing.Union[torch.Tensor, np.ndarray]):
         result = ensure_float_type(x)
 
-        # reference: https://www.ibm.com/docs/el/cognos-analytics/11.1.0?topic=terms-modified-z-score
         result -= self.median
         if self.mad == 0:
-            result /= (1.253314 * self.meanad)
+            result /= (self.MEANAD_SCALING_FACTOR * self.meanad)
         else:
-            result /= (1.486 * self.mad)  # 1.486 * mad approximately equals the standard deviation
+            result /= (self.MAD_SCALING_FACTOR * self.mad)
         return result
 
     def inverse_transform(self, x: torch.Tensor):
         result = ensure_float_type(x)
-
+        
         if self.mad == 0:
-            result *= (1.253314 * self.meanad)
+            result *= (self.MEANAD_SCALING_FACTOR * self.meanad)
         else:
-            result *= (1.486 * self.mad)
+            result *= (self.MAD_SCALING_FACTOR * self.mad)
         result += self.median
         return result
 
