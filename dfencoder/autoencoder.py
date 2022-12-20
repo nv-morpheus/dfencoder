@@ -1017,7 +1017,29 @@ class AutoEncoder(torch.nn.Module):
             cce_scaled = abs(cce_scaled)
 
         combined_loss = torch.cat([mse_scaled, bce_scaled, cce_scaled], dim=1)
+            
+        for i, ft in enumerate(self.numeric_fts):
+            pdf[ft] = df[ft]
+            pdf[ft + '_pred'] = output_df[ft]
+            pdf[ft + '_loss'] = mse[:, i].cpu().numpy()
+            pdf[ft + '_z_loss'] = mse_scaled[:, i].cpu().numpy()
 
+        for i, ft in enumerate(self.binary_fts):
+            pdf[ft] = df[ft]
+            pdf[ft + '_pred'] = output_df[ft]
+            pdf[ft + '_loss'] = bce[:, i].cpu().numpy()
+            pdf[ft + '_z_loss'] = bce_scaled[:, i].cpu().numpy()
+
+        for i, ft in enumerate(self.categorical_fts):
+            pdf[ft] = df[ft]
+            pdf[ft + '_pred'] = output_df[ft]
+            pdf[ft + '_loss'] = cce[:, i].cpu().numpy()
+            pdf[ft + '_z_loss'] = cce_scaled[:, i].cpu().numpy()
+
+        pdf['max_abs_z'] = combined_loss.max(dim=1)[0].cpu().numpy()
+        pdf['mean_abs_z'] = combined_loss.mean(dim=1).cpu().numpy()
+
+        # add a column describing the scaler of the losses
         if self.loss_scaler_str == 'standard':
             output_scaled_loss_str = 'z'
         elif self.loss_scaler_str == 'modified':
@@ -1025,26 +1047,6 @@ class AutoEncoder(torch.nn.Module):
         else:
             # in case other custom scaling is used
             output_scaled_loss_str = f'{self.loss_scaler_str}_scaled' 
-            
-        for i, ft in enumerate(self.numeric_fts):
-            pdf[ft] = df[ft]
-            pdf[ft + '_pred'] = output_df[ft]
-            pdf[ft + '_loss'] = mse[:, i].cpu().numpy()
-            pdf[ft + f'_{output_scaled_loss_str}_loss'] = mse_scaled[:, i].cpu().numpy()
-
-        for i, ft in enumerate(self.binary_fts):
-            pdf[ft] = df[ft]
-            pdf[ft + '_pred'] = output_df[ft]
-            pdf[ft + '_loss'] = bce[:, i].cpu().numpy()
-            pdf[ft + f'_{output_scaled_loss_str}_loss'] = bce_scaled[:, i].cpu().numpy()
-
-        for i, ft in enumerate(self.categorical_fts):
-            pdf[ft] = df[ft]
-            pdf[ft + '_pred'] = output_df[ft]
-            pdf[ft + '_loss'] = cce[:, i].cpu().numpy()
-            pdf[ft + f'_{output_scaled_loss_str}_loss'] = cce_scaled[:, i].cpu().numpy()
-
-        pdf[f'max_abs_{output_scaled_loss_str}'] = combined_loss.max(dim=1)[0].cpu().numpy()
-        pdf[f'mean_abs_{output_scaled_loss_str}'] = combined_loss.mean(dim=1).cpu().numpy()
+        pdf['z_loss_scaler_type'] = output_scaled_loss_str
 
         return pdf
