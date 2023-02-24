@@ -252,7 +252,7 @@ class AutoEncoder(torch.nn.Module):
 
     def init_numeric(self, df=None):
         """
-        Initialize the numerical features of the model by either using preset numerical scaler parameters
+        Initializes the numerical features of the model by either using preset numerical scaler parameters
         or by using the input data.
 
         Args:
@@ -373,7 +373,7 @@ class AutoEncoder(torch.nn.Module):
 
     def init_binary(self, df=None):
         """
-        Initialize the binary features of the model.
+        Initializes the binary features of the model.
 
         Args:
         df (pandas DataFrame, optional): The input data to be used to initialize the binary features.
@@ -553,6 +553,8 @@ class AutoEncoder(torch.nn.Module):
             # if there is no binary feature, ignore this layer to avoid errors while syncing parameters across gpus
             self._ddp_params_and_buffers_to_ignore.append('binary_output.weight')
 
+        self.to(self.device)
+
         ddp_model = DDP(self, device_ids=[rank], output_device=rank)
     
         # get optimizer
@@ -561,8 +563,6 @@ class AutoEncoder(torch.nn.Module):
             self.lr_decay = torch.optim.lr_scheduler.ExponentialLR(self.optim, self.lr_decay)
             
         self.build_logger()
-
-        self.to(self.device)
 
         if self.verbose:
             print('done!')
@@ -921,6 +921,19 @@ class AutoEncoder(torch.nn.Module):
     def fit_batch(
         self, input_swapped, num_target, bin_target, cat_target
     ):  
+        """
+        Forward pass on the input_swapped, then computes the losses from the predicted outputs and actual targets, 
+        performs backpropagation, updates the model parameters, and returns the net loss.
+
+        Args:
+            input_swapped (tensor): input tensor of shape (batch_size, feature vector size), some values are randomly swapped for denoising
+            num_target (tensor): tensor of shape (batch_size, numerical feature count) with numerical targets
+            bin_target (tensor): tensor of shape (batch_size, binary feature count) with binary targets
+            cat_target (list): list of size (categorical feature count), each entry is a 1-d tensor of shape (batch_size) containing the categorical targets
+        
+        Returns:
+            net_loss (float): total loss computed as the weighted sum of the mse, bce and cce losses
+        """
         num, bin, cat = self.forward(input_swapped)
         mse, bce, cce, net_loss = self.compute_loss_from_targets(
             num=num, 
@@ -937,6 +950,22 @@ class AutoEncoder(torch.nn.Module):
         return net_loss
 
     def validate_batch(self, input_original, input_swapped, num_target, bin_target, cat_target):
+        """
+        Forward pass on the validation inputs, then computes the losses from the predicted outputs and actual targets, 
+        and returns the net loss.
+
+        Args:
+            input_original (tensor): input tensor of shape (batch_size, feature vector size)
+            input_swapped (tensor): input tensor of shape (batch_size, feature vector size), some values are randomly swapped for denoising
+            num_target (tensor): tensor of shape (batch_size, numerical feature count) with numerical targets
+            bin_target (tensor): tensor of shape (batch_size, binary feature count) with binary targets
+            cat_target (list): list of size (categorical feature count), each entry is a 1-d tensor of shape (batch_size) containing the categorical targets
+        
+        Returns:
+            A tuple containing two floats:
+            - orig_net_loss: the net loss when passing `input_original` through the model
+            - net_loss: the net loss when passing the `input_swapped` through the model
+        """
         orig_num, orig_bin, orig_cat = self.forward(input_original)
         _, _, _, orig_net_loss = self.compute_loss_from_targets(
             num=orig_num, 
@@ -961,13 +990,22 @@ class AutoEncoder(torch.nn.Module):
         return orig_net_loss, net_loss
 
     def run_validation(self, val_dataset, rank=None):
+        """
+        Runs a validation loop on the given validation dataset, computing and returning the average loss of both the original
+        input and the input with swapped values.
+
+        Args:
+            val_dataset (torch.utils.data.Dataset): validation dataset to be used for validation
+            rank (int): optional rank of the process being used for distributed training, used only for logging
+
+        Returns:
+            float: the average loss of the original input in the validation dataset
+        """
         self.eval()
         with torch.no_grad():
             swapped_loss = []
             id_loss = []
-            for step, data_d in enumerate(val_dataset):
-                # if self.verbose:
-                #     print(f'Validating batch {step}... (batch size: {self.eval_batch_size})')
+            for data_d in val_dataset:
                 orig_net_loss, net_loss = self.validate_batch(**data_d['data'])
                 id_loss.append(orig_net_loss)
                 swapped_loss.append(net_loss)
@@ -981,6 +1019,11 @@ class AutoEncoder(torch.nn.Module):
         return id_loss
 
     def populate_loss_stats_from_dataset(self, dataset):
+        """
+        Populates the `self.feature_loss_stats` dict with feature losses computed using the provided dataset.
+        Args:
+            dataset (torch.utils.data.Dataset): dataset to compute the feature losses for
+        """
         self.eval()
         feature_losses = self.get_feature_losses_from_dataset(dataset)
         # populate loss stats
@@ -989,18 +1032,35 @@ class AutoEncoder(torch.nn.Module):
             self.feature_loss_stats[ft] = self._create_stat_dict(loss)
 
     def get_feature_losses_from_dataset(self, dataset):
-        # return a dict mapping feature names to a tensor of losses
+        """
+        Computes the feature losses for each feature in the model for a given dataset.
+        Args:
+            dataset (torch.utils.data.Dataset): dataset to compute the feature losses for
+
+        Returns:
+            feature_losses (dict): a dict mapping feature names to a tensor of losses
+        """
         feature_losses = defaultdict(list)
         with torch.no_grad():
-            for step, data_d in enumerate(dataset):
-                # if self.verbose:
-                #     print(f'Validating batch {step}... (batch size: {self.eval_batch_size})')
-                batch_feature_losses, _ = self.get_batch_feature_losses_and_output(**data_d['data'], include_output_df=False)
+            for data_d in dataset:
+                batch_feature_losses = self.get_batch_feature_losses(**data_d['data'])
                 for ft, loss_l in batch_feature_losses.items():
                     feature_losses[ft].append(loss_l)
         return {ft: torch.cat(tensor_l, dim=0) for ft, tensor_l in feature_losses.items()}
 
-    def get_batch_feature_losses_and_output(self, input_original, input_swapped, num_target, bin_target, cat_target, include_output_df=True):
+    def get_batch_feature_losses(self, input_original, num_target, bin_target, cat_target, **kwargs):
+        """
+        Calculates the feature-wise losses for a batch of input data.
+
+        Args:
+            input_original (tensor): input tensor of shape (batch_size, feature vector size)
+            num_target (tensor): tensor of shape (batch_size, numerical feature count) with numerical targets
+            bin_target (tensor): tensor of shape (batch_size, binary feature count) with binary targets
+            cat_target (list): list of size (categorical feature count), each entry is a 1-d tensor of shape (batch_size) containing the categorical targets
+
+        Returns:
+            batch_feature_losses (dict): a dict mapping feature names to a tensor of losses for the batch
+        """
         batch_feature_losses = {}
 
         encoding = self.encode(input_original)
@@ -1016,15 +1076,22 @@ class AutoEncoder(torch.nn.Module):
         for i, ft in enumerate(self.categorical_fts):
             loss = self.cce(cat[i], cat_target[i])
             batch_feature_losses[ft] = loss
-            
-        if include_output_df:
-            output_df = self.decode_to_df(encoding)
-        else:
-            output_df = None
-        return batch_feature_losses, output_df
+        
+        return batch_feature_losses
 
-    def get_results_from_dataset(self, dataset, preloaded_df=None, return_abs=False):
-        df = preloaded_df if preloaded_df is not None else dataset.get_preloaded_data()
+    def get_results_from_dataset(self, dataset, preloaded_df, return_abs=False):
+        """
+        Returns a pandas dataframe of inference results and losses for a given dataset.
+        Note. this function requires the whole inference set to be in loaded into memory as a pandas df
+
+        Args:
+            dataset (torch.utils.data.Dataset): dataset for inference
+            preloaded_df: a pandas dataframe that contains the original data
+            return_abs: a boolean flag indicating whether the absolute value of the loss scalers should be returned.
+            
+        Returns:
+            result (pandas dataframe): inference result with losses of each feature
+        """
         result = pd.DataFrame()
 
         if self.verbose:
@@ -1037,19 +1104,23 @@ class AutoEncoder(torch.nn.Module):
             for step, data_d in enumerate(dataset):
                 if self.verbose:          
                     print(f'\tinferencing batch {step}...')
-                batch_feature_losses, batch_output_df = self.get_batch_feature_losses_and_output(**data_d['data'], include_output_df=True)
+
+                batch_feature_losses = self.get_batch_feature_losses(**data_d['data'])
                 for ft, loss_l in batch_feature_losses.items():
                     feature_losses[ft].append(loss_l)
+                
+                encoding = self.encode(data_d['data']['input_original'])
+                batch_output_df = self.decode_to_df(encoding)
                 output_df.append(batch_output_df)
     
         if self.verbose:
-            print(f'\tdone running inference. making output df...')
+            print(f'\tDone running inference. Making output df...')
         
         feature_losses = {ft: torch.cat(tensor_l, dim=0) for ft, tensor_l in feature_losses.items()}
         output_df = pd.concat(output_df).reset_index(drop=True)
 
         for ft, loss_tensor in feature_losses.items():
-            result[ft] = df[ft]
+            result[ft] = preloaded_df[ft]
             result[ft + '_pred'] = output_df[ft]
             result[ft + '_loss'] = loss_tensor.cpu().numpy()
             z_loss = self.feature_loss_stats[ft]['scaler'].transform(loss_tensor)
