@@ -51,12 +51,11 @@ import pandas as pd
 import torch
 import tqdm
 from collections import defaultdict
-from torch.nn.parallel import DistributedDataParallel as DDP
 
 from .dataframe import EncoderDataFrame
 from .logging import BasicLogger, IpynbLogger, TensorboardXLogger
 from .scalers import GaussRankScaler, NullScaler, StandardScaler, ModifiedScaler
-
+from .ae_module import AutoEncoder, DistributedAutoEncoder
 
 def ohe(input_vector, dim, device="cpu"):
     """Does one-hot encoding of input vector."""
@@ -72,70 +71,7 @@ def ohe(input_vector, dim, device="cpu"):
     return y_onehot
 
 
-def compute_embedding_size(n_categories):
-    """
-    Applies a standard formula to choose the number of feature embeddings
-    to use in a given embedding layers.
-
-    n_categories is the number of unique categories in a column.
-    """
-    val = min(600, round(1.6 * n_categories**0.56))
-    return int(val)
-
-
-class CompleteLayer(torch.nn.Module):
-    """
-    Impliments a layer with linear transformation
-    and optional activation and dropout."""
-
-    def __init__(self, in_dim, out_dim, activation=None, dropout=None, *args, **kwargs):
-        super(CompleteLayer, self).__init__(*args, **kwargs)
-        self.layers = []
-        linear = torch.nn.Linear(in_dim, out_dim)
-        self.layers.append(linear)
-        self.add_module('linear_layer', linear)
-        if activation is not None:
-            act = self.interpret_activation(activation)
-            self.layers.append(act)
-        if dropout is not None:
-            dropout_layer = torch.nn.Dropout(dropout)
-            self.layers.append(dropout_layer)
-            self.add_module('dropout', dropout_layer)
-
-    def interpret_activation(self, act=None):
-        if act is None:
-            act = self.activation
-        activations = {
-            'leaky_relu': torch.nn.functional.leaky_relu,
-            'relu': torch.relu,
-            'sigmoid': torch.sigmoid,
-            'tanh': torch.tanh,
-            'selu': torch.selu,
-            'hardtanh': torch.nn.functional.hardtanh,
-            'relu6': torch.nn.functional.relu6,
-            'elu': torch.nn.functional.elu,
-            'celu': torch.nn.functional.celu,
-            'rrelu': torch.nn.functional.rrelu,
-            'hardshrink': torch.nn.functional.hardshrink,
-            'tanhshrink': torch.nn.functional.tanhshrink,
-            'softsign': torch.nn.functional.softsign
-        }
-        try:
-            return activations[act]
-        except:
-            msg = f'activation {act} not understood. \n'
-            msg += 'please use one of: \n'
-            msg += str(list(activations.keys()))
-            raise Exception(msg)
-
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return x
-
-
-class AutoEncoder(torch.nn.Module):
-
+class DFEncoder:
     def __init__(self,
                  encoder_layers=None,
                  decoder_layers=None,
@@ -171,26 +107,40 @@ class AutoEncoder(torch.nn.Module):
                  preset_numerical_scaler_params=None,
                  binary_feature_list=None,
                  loss_scaler='standard',  # scaler for the losses (z score)
+                 distributed_training=False,
                  *args,
                  **kwargs):
-        super(AutoEncoder, self).__init__(*args, **kwargs)
         self.numeric_fts = OrderedDict()
         self.binary_fts = OrderedDict()
         self.categorical_fts = OrderedDict()
         self.cyclical_fts = OrderedDict()
         self.feature_loss_stats = dict()
-        self.encoder_layers = encoder_layers
-        self.decoder_layers = decoder_layers
-        self.encoder_activations = encoder_activations
-        self.decoder_activations = decoder_activations
-        self.encoder_dropout = encoder_dropout
-        self.decoder_dropout = decoder_dropout
+
+        if device is None:
+            self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = device
+
+        self.model = AutoEncoder(
+            verbose=verbose, 
+            encoder_layers=encoder_layers,
+            decoder_layers=decoder_layers,
+            encoder_dropout=encoder_dropout,
+            decoder_dropout=decoder_dropout,
+            encoder_activations=encoder_activations,
+            decoder_activations=decoder_activations,
+            activation=activation,
+            device=self.device,
+            *args, **kwargs,
+        )
+        self.optimizer = optimizer
+        self.optim = None
+        self.lr = lr
+        self.lr_decay = lr_decay
+        
         self.min_cats = min_cats
         self.preset_cats = preset_cats
         self.preset_numerical_scaler_params = preset_numerical_scaler_params
-        self.encoder = []
-        self.decoder = []
-        self.train_mode = self.train
 
         self.swap_p = swap_p
         self.batch_size = batch_size
@@ -202,17 +152,12 @@ class AutoEncoder(torch.nn.Module):
         self.num_names = []
         self.bin_names = binary_feature_list or []
 
-        self.activation = activation
-        self.optimizer = optimizer
-        self.lr = lr
-        self.lr_decay = lr_decay
         self.amsgrad = amsgrad
         self.momentum = momentum
         self.betas = betas
         self.dampening = dampening
         self.weight_decay = weight_decay
         self.nesterov = nesterov
-        self.optim = None
         self.progress_bar = progress_bar
 
         self.mse = torch.nn.modules.loss.MSELoss(reduction='none')
@@ -220,11 +165,6 @@ class AutoEncoder(torch.nn.Module):
         self.cce = torch.nn.modules.loss.CrossEntropyLoss(reduction='none')
 
         self.verbose = verbose
-
-        if device is None:
-            self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        else:
-            self.device = device
 
         self.logger = logger
         self.logdir = logdir
@@ -238,8 +178,8 @@ class AutoEncoder(torch.nn.Module):
         self.loss_scaler = self.get_scaler(loss_scaler)
 
         self.n_megabatches = n_megabatches
-
-
+        self.distributed_training = distributed_training
+        
     def get_scaler(self, name):
         scalers = {
             'standard': StandardScaler, 
@@ -419,38 +359,6 @@ class AutoEncoder(torch.nn.Module):
             self.init_cats(df)
         self.init_numeric(df)
         self.init_binary(df)
-
-    def build_inputs(self):
-        # will compute total number of inputs
-        input_dim = 0
-
-        # create categorical variable embedding layers
-        for ft in self.categorical_fts:
-            feature = self.categorical_fts[ft]
-            n_cats = len(feature['cats']) + 1
-            embed_dim = compute_embedding_size(n_cats)
-            embed_layer = torch.nn.Embedding(n_cats, embed_dim)
-            feature['embedding'] = embed_layer
-            self.add_module(f'{ft} embedding', embed_layer)
-            # track embedding inputs
-            input_dim += embed_dim
-
-        # include numeric and binary fts
-        input_dim += len(self.numeric_fts)
-        input_dim += len(self.binary_fts)
-
-        return input_dim
-
-    def build_outputs(self, dim):
-        self.numeric_output = torch.nn.Linear(dim, len(self.numeric_fts))
-        self.binary_output = torch.nn.Linear(dim, len(self.binary_fts))
-
-        for ft in self.categorical_fts:
-            feature = self.categorical_fts[ft]
-            cats = feature['cats']
-            layer = torch.nn.Linear(dim, len(cats) + 1)
-            feature['output_layer'] = layer
-            self.add_module(f'{ft}_output', layer)
         
     def prepare_df(self, df):
         """
@@ -477,9 +385,47 @@ class AutoEncoder(torch.nn.Module):
 
         return output_df
 
-    def build_optimizer(self, distributed_model=None):
+    def build_model(self, df=None, rank=None):
+        """
+        Takes a pandas dataframe as input.
+        Builds autoencoder model.
+
+        Returns the dataframe after making changes.
+        """
+        if self.verbose:
+            print('Building model...')
+
+        # get metadata from features
+        self.init_features(df)
+
+        self.model.build(self.numeric_fts, self.binary_fts, self.categorical_fts)
+        if self.distributed_training:
+            if rank is None:
+                raise ValueError('`rank` missing. `rank` is required for distributed training.')
+
+            self.model._ddp_params_and_buffers_to_ignore = []
+            if len(self.numeric_fts) == 0:
+                # if there is no numeric feature, ignore this layer to avoid errors while syncing parameters across gpus
+                self.model._ddp_params_and_buffers_to_ignore.append('numeric_output.weight')
+            if len(self.binary_fts) == 0:
+                # if there is no binary feature, ignore this layer to avoid errors while syncing parameters across gpus
+                self.model._ddp_params_and_buffers_to_ignore.append('binary_output.weight')
+            
+            self.model = DistributedAutoEncoder(self.model, device_ids=[rank], output_device=rank)
+
+        # get optimizer
+        self.build_optimizer()
+        if self.lr_decay is not None:
+            self.lr_decay = torch.optim.lr_scheduler.ExponentialLR(self.optim, self.lr_decay)
+
+        self.build_logger()
+
+        if self.verbose:
+            print('done!')
+
+    def build_optimizer(self):
         lr = self.lr
-        params = self.parameters() if distributed_model is None else distributed_model.parameters()
+        params = self.model.parameters()
         if self.optimizer == 'adam':
             optim = torch.optim.Adam(params,
                                     lr=self.lr,
@@ -499,121 +445,6 @@ class AutoEncoder(torch.nn.Module):
             raise ValueError('Provided optimizer unsupported. Supported optimizers include: [adam, sgd].')
         self.optim = optim
 
-    def build_model(self, df=None):
-        """
-        Takes a pandas dataframe as input.
-        Builds autoencoder model.
-
-        Returns the dataframe after making changes.
-        """
-        if self.verbose:
-            print('Building model...')
-
-        # get metadata from features
-        self.init_features(df)
-        input_dim = self.build_inputs()
-
-        dim = self.build_layers(input_dim)
-
-        # set up predictive outputs
-        self.build_outputs(dim)
-
-        # get optimizer
-        self.build_optimizer()
-        if self.lr_decay is not None:
-            self.lr_decay = torch.optim.lr_scheduler.ExponentialLR(self.optim, self.lr_decay)
-
-        self.build_logger()
-
-        self.to(self.device)
-
-        if self.verbose:
-            print('done!')
-
-    def build_distributed_model(self, rank):
-        """
-        Builds a distributed model for training using PyTorch's DistributedDataParallel module.
-        """
-        if self.verbose:
-            print('Building distributed model...')
-
-        # get metadata from features
-        self.init_features()
-        input_dim = self.build_inputs()
-
-        dim = self.build_layers(input_dim)
-
-        # set up predictive outputs
-        self.build_outputs(dim)
-        self._ddp_params_and_buffers_to_ignore = []
-        if len(self.numeric_fts) == 0:
-            # if there is no numeric feature, ignore this layer to avoid errors while syncing parameters across gpus
-            self._ddp_params_and_buffers_to_ignore.append('numeric_output.weight')
-        if len(self.binary_fts) == 0:
-            # if there is no binary feature, ignore this layer to avoid errors while syncing parameters across gpus
-            self._ddp_params_and_buffers_to_ignore.append('binary_output.weight')
-
-        self.to(self.device)
-
-        ddp_model = DDP(self, device_ids=[rank], output_device=rank)
-    
-        # get optimizer
-        self.build_optimizer(distributed_model=ddp_model)
-        if self.lr_decay is not None:
-            self.lr_decay = torch.optim.lr_scheduler.ExponentialLR(self.optim, self.lr_decay)
-            
-        self.build_logger()
-
-        if self.verbose:
-            print('done!')
-
-    def build_layers(self, input_dim):
-        """
-        Constructs the encoder and decoder layers for the autoencoder model.
-
-        Args:
-            input_dim (int): The input dimension of the autoencoder model.
-
-        Returns:
-            The output dimension of the encoder layers (int).
-        """
-        # construct a canned denoising autoencoder architecture
-        if self.encoder_layers is None:
-            self.encoder_layers = [int(4 * input_dim) for _ in range(3)]
-
-        if self.decoder_layers is None:
-            self.decoder_layers = []
-
-        if self.encoder_activations is None:
-            self.encoder_activations = [self.activation for _ in self.encoder_layers]
-
-        if self.decoder_activations is None:
-            self.decoder_activations = [self.activation for _ in self.decoder_layers]
-
-        if self.encoder_dropout is None or type(self.encoder_dropout) == float:
-            drp = self.encoder_dropout
-            self.encoder_dropout = [drp for _ in self.encoder_layers]
-
-        if self.decoder_dropout is None or type(self.decoder_dropout) == float:
-            drp = self.decoder_dropout
-            self.decoder_dropout = [drp for _ in self.decoder_layers]
-
-        for i, dim in enumerate(self.encoder_layers):
-            activation = self.encoder_activations[i]
-            layer = CompleteLayer(input_dim, dim, activation=activation, dropout=self.encoder_dropout[i])
-            input_dim = dim
-            self.encoder.append(layer)
-            self.add_module(f'encoder_{i}', layer)
-
-        for i, dim in enumerate(self.decoder_layers):
-            activation = self.decoder_activations[i]
-            layer = CompleteLayer(input_dim, dim, activation=activation, dropout=self.decoder_dropout[i])
-            input_dim = dim
-            self.decoder.append(layer)
-            self.add_module(f'decoder_{i}', layer)
-
-        return input_dim
-
     def build_logger(self):
         """ Initializes the logger to be used for training the model."""
         cat_names = list(self.categorical_fts.keys())
@@ -630,7 +461,6 @@ class AutoEncoder(torch.nn.Module):
         bin = torch.tensor(df[self.bin_names].astype(int).values).float().to(self.device)
         codes = []
         for ft in self.categorical_fts:
-            feature = self.categorical_fts[ft]
             code = torch.tensor(df[ft].cat.codes.astype(int).values).to(self.device)
             codes.append(code)
         return num, bin, codes
@@ -642,9 +472,8 @@ class AutoEncoder(torch.nn.Module):
         """
         num, bin, codes = self.compute_targets(df)
         embeddings = []
-        for i, ft in enumerate(self.categorical_fts):
-            feature = self.categorical_fts[ft]
-            emb = feature['embedding'](codes[i])
+        for i, embedding_layer in enumerate(self.model.categorical_embedding.values()):
+            emb = embedding_layer(codes[i])
             embeddings.append(emb)
         return [num], [bin], embeddings
 
@@ -652,40 +481,6 @@ class AutoEncoder(torch.nn.Module):
         num, bin, embeddings = self.encode_input(df)
         x = torch.cat(num + bin + embeddings, dim=1)
         return x
-
-    def compute_outputs(self, x):
-        num = self.numeric_output(x)
-        bin = self.binary_output(x)
-        bin = torch.sigmoid(bin)
-        cat = []
-        for ft in self.categorical_fts:
-            feature = self.categorical_fts[ft]
-            out = feature['output_layer'](x)
-            cat.append(out)
-        return num, bin, cat
-
-    def encode(self, x, layers=None):
-        if layers is None:
-            layers = len(self.encoder)
-        for i in range(layers):
-            layer = self.encoder[i]
-            x = layer(x)
-        return x
-
-    def decode(self, x, layers=None):
-        if layers is None:
-            layers = len(self.decoder)
-        for i in range(layers):
-            layer = self.decoder[i]
-            x = layer(x)
-        num, bin, cat = self.compute_outputs(x)
-        return num, bin, cat
-
-    def forward(self, input):
-        encoding = self.encode(input)
-        num, bin, cat = self.decode(encoding)
-
-        return num, bin, cat
 
     def compute_loss(self, num, bin, cat, target_df, logging=True, _id=False):
         num_target, bin_target, codes = self.compute_targets(target_df)
@@ -721,24 +516,21 @@ class AutoEncoder(torch.nn.Module):
             val = loss.cpu().item()
             net_loss += [val]
         if logging:
-            if self.training:
+            if self.model.training:
                 self.logger.training_step(net_loss)
             elif _id:
                 self.logger.id_val_step(net_loss)
-            elif not self.training:
+            elif not self.model.training:
                 self.logger.val_step(net_loss)
         net_loss = np.array(net_loss).mean()
         return mse_loss, bce_loss, cce_loss, net_loss
 
     def do_backward(self, mse, bce, cce):
-
-        mse.backward(retain_graph=True)
-        bce.backward(retain_graph=True)
-        for i, ls in enumerate(cce):
-            if i == len(cce) - 1:
-                ls.backward(retain_graph=False)
-            else:
-                ls.backward(retain_graph=True)
+        # running `backward()` sepeately on mse/bce/cce is equivalent to summing them up and run `backward()` once
+        loss_fn = mse + bce
+        for ls in cce:
+            loss_fn += ls
+        loss_fn.backward()
 
     def compute_baseline_performance(self, in_, out_):
         """
@@ -753,7 +545,7 @@ class AutoEncoder(torch.nn.Module):
         Returns net loss on baseline performance computation
             (sum of all losses)
         """
-        self.eval()
+        self.model.eval()
         num_pred, bin_pred, codes = self.compute_targets(in_)
         bin_pred += ((bin_pred == 0).float() * 0.05)
         bin_pred -= ((bin_pred == 1).float() * 0.05)
@@ -830,7 +622,7 @@ class AutoEncoder(torch.nn.Module):
         
         count_es = 0
         for i in range(epochs):
-            self.train()
+            self.model.train()
             if self.verbose:
                 print(f'training epoch {i + 1}...')
             df = df.sample(frac=1.0)
@@ -845,7 +637,7 @@ class AutoEncoder(torch.nn.Module):
                 self.lr_decay.step()
 
             if run_validation and val is not None:
-                self.eval()
+                self.model.eval()
                 with torch.no_grad():
                     swapped_loss = []
                     id_loss = []
@@ -859,11 +651,11 @@ class AutoEncoder(torch.nn.Module):
                         slc_out = val_df.iloc[start:stop]
                         slc_out_tensor = self.build_input_tensor(slc_out)
 
-                        num, bin, cat = self.forward(slc_in_tensor)
+                        num, bin, cat = self.model(slc_in_tensor)
                         _, _, _, net_loss = self.compute_loss(num, bin, cat, slc_out)
                         swapped_loss.append(net_loss)
 
-                        num, bin, cat = self.forward(slc_out_tensor)
+                        num, bin, cat = self.model(slc_out_tensor)
                         _, _, _, net_loss = self.compute_loss(num, bin, cat, slc_out, _id=True)
                         id_loss.append(net_loss)
 
@@ -890,8 +682,7 @@ class AutoEncoder(torch.nn.Module):
                     last_loss = current_net_loss
 
                     self.logger.end_epoch()
-                    #                     if self.project_embeddings:
-                    #                         self.logger.show_embeddings(self.categorical_fts)
+
                     if self.verbose:
                         swapped_loss = np.array(swapped_loss).mean()
                         id_loss = np.array(id_loss).mean()
@@ -934,7 +725,8 @@ class AutoEncoder(torch.nn.Module):
         Returns:
             net_loss (float): total loss computed as the weighted sum of the mse, bce and cce losses
         """
-        num, bin, cat = self.forward(input_swapped)
+        self.model.train()
+        num, bin, cat = self.model(input_swapped)
         mse, bce, cce, net_loss = self.compute_loss_from_targets(
             num=num, 
             bin=bin, 
@@ -966,7 +758,7 @@ class AutoEncoder(torch.nn.Module):
             - orig_net_loss: the net loss when passing `input_original` through the model
             - net_loss: the net loss when passing the `input_swapped` through the model
         """
-        orig_num, orig_bin, orig_cat = self.forward(input_original)
+        orig_num, orig_bin, orig_cat = self.model(input_original)
         _, _, _, orig_net_loss = self.compute_loss_from_targets(
             num=orig_num, 
             bin=orig_bin, 
@@ -977,7 +769,7 @@ class AutoEncoder(torch.nn.Module):
             logging=True,
         )
         
-        num, bin, cat = self.forward(input_swapped)
+        num, bin, cat = self.model(input_swapped)
         _, _, _, net_loss = self.compute_loss_from_targets(
             num=num, 
             bin=bin, 
@@ -1001,7 +793,7 @@ class AutoEncoder(torch.nn.Module):
         Returns:
             float: the average loss of the original input in the validation dataset
         """
-        self.eval()
+        self.model.eval()
         with torch.no_grad():
             swapped_loss = []
             id_loss = []
@@ -1024,7 +816,7 @@ class AutoEncoder(torch.nn.Module):
         Args:
             dataset (torch.utils.data.Dataset): dataset to compute the feature losses for
         """
-        self.eval()
+        self.model.eval()
         feature_losses = self.get_feature_losses_from_dataset(dataset)
         # populate loss stats
         for ft, losses in feature_losses.items():
@@ -1063,8 +855,7 @@ class AutoEncoder(torch.nn.Module):
         """
         batch_feature_losses = {}
 
-        encoding = self.encode(input_original)
-        num, bin, cat = self.decode(encoding)
+        num, bin, cat = self.model(input_original)
         mse_loss = self.mse(num, num_target)
         for i, ft in enumerate(self.numeric_fts):
             batch_feature_losses[ft] = mse_loss[:, i]
@@ -1097,7 +888,7 @@ class AutoEncoder(torch.nn.Module):
         if self.verbose:
             print(f'Getting inference results... (total of {len(dataset)} batches)')
 
-        self.eval()
+        self.model.eval()
         feature_losses = defaultdict(list)
         output_df = []
         with torch.no_grad():
@@ -1109,8 +900,8 @@ class AutoEncoder(torch.nn.Module):
                 for ft, loss_l in batch_feature_losses.items():
                     feature_losses[ft].append(loss_l)
                 
-                encoding = self.encode(data_d['data']['input_original'])
-                batch_output_df = self.decode_to_df(encoding)
+                num, bin, cat = self.model(data_d['data']['input_original'])
+                batch_output_df = self.decode_outputs_to_df(num=num, bin=bin, cat=cat)
                 output_df.append(batch_output_df)
     
         if self.verbose:
@@ -1153,13 +944,12 @@ class AutoEncoder(torch.nn.Module):
             close = False
 
         for j in range(n_updates):
-
             start = j * self.batch_size
             stop = (j + 1) * self.batch_size
             in_sample = input_df.iloc[start:stop]
             in_sample_tensor = self.build_input_tensor(in_sample)
             target_sample = df.iloc[start:stop]
-            num, bin, cat = self.forward(in_sample_tensor)
+            num, bin, cat = self.model(in_sample_tensor) # forward
             mse, bce, cce, net_loss = self.compute_loss(num, bin, cat, target_sample, logging=True)
             self.do_backward(mse, bce, cce)
             self.optim.step()
@@ -1220,7 +1010,7 @@ class AutoEncoder(torch.nn.Module):
         if len(df) % self.eval_batch_size != 0:
             n_batches += 1
 
-        self.eval()
+        self.model.eval()
         if self.optim is None:
             self.build_model(df)
         df = self.prepare_df(df)
@@ -1232,10 +1022,10 @@ class AutoEncoder(torch.nn.Module):
                 x = torch.cat(num + bin + embeddings, dim=1)
                 if layer <= 0:
                     layers = len(self.encoder) + layer
-                    x = self.encode(x, layers=layers)
+                    x = self.model.encode(x, layers=layers)
                 else:
-                    x = self.encode(x)
-                    x = self.decode(x, layers=layer)
+                    x = self.model.encode(x)
+                    x = self.model.decode(x, layers=layer)
                 result.append(x)
         z = torch.cat(result, dim=0)
         return z
@@ -1252,7 +1042,7 @@ class AutoEncoder(torch.nn.Module):
         if len(df) % self.eval_batch_size != 0:
             n_batches += 1
 
-        self.eval()
+        self.model.eval()
         if self.optim is None:
             self.build_model(df)
         df = self.prepare_df(df)
@@ -1287,18 +1077,16 @@ class AutoEncoder(torch.nn.Module):
 
         return net_loss
 
-    def decode_to_df(self, x, df=None):
+    def decode_outputs_to_df(self, num, bin, cat, df=None):
         """
-        Runs input embeddings through decoder
-        and converts outputs into a dataframe.
+        Converts the model outputs of the numerical, binary, and categorical features 
+        back into a pandas dataframe.
         """
         if df is None:
             cols = [x for x in self.binary_fts.keys()]
             cols += [x for x in self.numeric_fts.keys()]
             cols += [x for x in self.categorical_fts.keys()]
-            df = pd.DataFrame(index=range(len(x)), columns=cols)
-
-        num, bin, cat = self.decode(x)
+            df = pd.DataFrame(index=range(len(num)), columns=cols)
 
         num_cols = [x for x in self.numeric_fts.keys()]
         num_df = pd.DataFrame(data=num.cpu().numpy(), index=df.index)
@@ -1346,13 +1134,13 @@ class AutoEncoder(torch.nn.Module):
         Outputs dataframe with same shape as input
             containing model predictions.
         """
-        self.eval()
+        self.model.eval()
         data = self.prepare_df(df)
         with torch.no_grad():
             num, bin, embeddings = self.encode_input(data)
             x = torch.cat(num + bin + embeddings, dim=1)
-            x = self.encode(x)
-            output_df = self.decode_to_df(x, df=df)
+            num, bin, cat = self.model(x)
+            output_df = self.decode_outputs_to_df(num=num, bin=bin, cat=cat, df=df)
 
         return output_df
 
@@ -1369,7 +1157,7 @@ class AutoEncoder(torch.nn.Module):
         Run the input dataframe `df` through the autoencoder to get the recovery losses by feature type 
         (numerical/boolean/categorical). 
         """
-        self.eval()
+        self.model.eval()
 
         n_batches = len(df) // self.batch_size
         if len(df) % self.batch_size > 0:
@@ -1387,7 +1175,7 @@ class AutoEncoder(torch.nn.Module):
 
                 input_slice = self.build_input_tensor(data_slice)
 
-                num, bin, cat = self.forward(input_slice)
+                num, bin, cat = self.model(input_slice)
                 mse_loss_slice: torch.Tensor = self.mse(num, num_target)
                 bce_loss_slice: torch.Tensor = self.bce(bin, bin_target)
                 cce_loss_slice_of_each_feat = [] # each entry in this list is the cce loss of a feature, ordered by the feature list self.categorical_fts
@@ -1426,15 +1214,15 @@ class AutoEncoder(torch.nn.Module):
     
     def get_results(self, df, return_abs=False):
         pdf = pd.DataFrame()
-        self.eval()
+        self.model.eval()
 
         data = self.prepare_df(df)
 
         with torch.no_grad():
             num, bin, embeddings = self.encode_input(data)
             x = torch.cat(num + bin + embeddings, dim=1)
-            x = self.encode(x)
-            output_df = self.decode_to_df(x)
+            num, bin, cat = self.model(x)
+            output_df = self.decode_outputs_to_df(num=num, bin=bin, cat=cat, df=df)
             
         # set the index of the prediction df to match the input df    
         output_df.index = df.index
