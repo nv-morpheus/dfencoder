@@ -482,6 +482,37 @@ class DFEncoder:
         x = torch.cat(num + bin + embeddings, dim=1)
         return x
 
+    def preprocess_data(self, df, shuffle_rows_in_batch=True, include_original_input_tensor=False):
+        """
+        Preprocesses a pandas dataFrame `df` for input into the autoencoder model. 
+
+        Args:
+            df (pandas dataFrame): the input dataFrame to preprocess
+            shuffle_rows_in_batch (bool, optional): whether to shuffle the rows of the dataFrame before processing
+            include_original_input_tensor: whether to process the df into an input tensor without swapping and include 
+                it in the returned data dict. 
+                Note. Training required only the swapped input tensor while validation can use both.
+        
+        Returns:
+            preprocessed_data (dict): a dict containing the preprocessed input data and targets by feature type
+        """
+        df = self.prepare_df(df)
+        if shuffle_rows_in_batch:
+            df = df.sample(frac=1.0)
+        df = EncoderDataFrame(df)
+        input_df = df.swap(likelihood=self.swap_p)
+        in_sample_tensor = self.build_input_tensor(input_df)
+        num_target, bin_target, codes = self.compute_targets(df)
+        preprocessed_data = {
+            'input_swapped': in_sample_tensor, 
+            'num_target': num_target, 
+            'bin_target': bin_target, 
+            'cat_target': codes
+        }
+        if include_original_input_tensor:
+            preprocessed_data['input_original'] = self.build_input_tensor(df)
+        return preprocessed_data
+
     def compute_loss(self, num, bin, cat, target_df, logging=True, _id=False):
         num_target, bin_target, codes = self.compute_targets(target_df)
         return self.compute_loss_from_targets(
@@ -496,6 +527,22 @@ class DFEncoder:
         )
 
     def compute_loss_from_targets(self, num, bin, cat, num_target, bin_target, cat_target, logging=True, _id=False):
+        """
+        Computes the loss from targets.
+
+        Args:
+            num (tensor): numerical data tensor
+            bin (tensor): binary data tensor
+            cat (list of tensors): list of categorical data tensors
+            num_target (tensor): target numerical data tensor
+            bin_target (tensor): target binary data tensor
+            cat_target (list of tensors): list of target categorical data tensors
+            logging (bool): whether to log the loss in self.logger
+            _id (bool): whether the current step is an id validation step (for logging)
+
+        Returns:
+            tuple: A tuple containing the mean mse/bce losses, list of mean cce losses, and mean net loss
+        """
         if logging:
             if self.logger is not None:
                 logging = True
