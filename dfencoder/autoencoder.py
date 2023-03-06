@@ -57,6 +57,9 @@ from .logging import BasicLogger, IpynbLogger, TensorboardXLogger
 from .scalers import GaussRankScaler, NullScaler, StandardScaler, ModifiedScaler
 from .ae_module import AutoEncoder, DistributedAutoEncoder
 
+
+import json
+
 def ohe(input_vector, dim, device="cpu"):
     """Does one-hot encoding of input vector."""
     batch_size = len(input_vector)
@@ -107,7 +110,6 @@ class DFEncoder:
                  preset_numerical_scaler_params=None,
                  binary_feature_list=None,
                  loss_scaler='standard',  # scaler for the losses (z score)
-                 distributed_training=False,
                  *args,
                  **kwargs):
         self.numeric_fts = OrderedDict()
@@ -178,7 +180,6 @@ class DFEncoder:
         self.loss_scaler = self.get_scaler(loss_scaler)
 
         self.n_megabatches = n_megabatches
-        self.distributed_training = distributed_training
         
     def get_scaler(self, name):
         scalers = {
@@ -385,12 +386,16 @@ class DFEncoder:
 
         return output_df
 
-    def build_model(self, df=None, rank=None):
+    def build_model(self, df=None, distributed_training=False, rank=None):
         """
-        Takes a pandas dataframe as input.
-        Builds autoencoder model.
+        Builds the autoencoder model using either the given dataframe or the preset feature information for metadata.
+        If distributed training is enabled, wraps the pytorch module by DDP.
 
-        Returns the dataframe after making changes.
+        Args:
+            df (dataframe, optional): the input dataframe to be used to infer metadata
+            distributed_training (bool, optional): whether to enable distributed training
+            rank (int, optional): rank of the process being used for distributed training, 
+                used only if distributed_training=True
         """
         if self.verbose:
             print('Building model...')
@@ -399,7 +404,7 @@ class DFEncoder:
         self.init_features(df)
 
         self.model.build(self.numeric_fts, self.binary_fts, self.categorical_fts)
-        if self.distributed_training:
+        if distributed_training:
             if rank is None:
                 raise ValueError('`rank` missing. `rank` is required for distributed training.')
 
@@ -413,7 +418,6 @@ class DFEncoder:
             
             self.model = DistributedAutoEncoder(self.model, device_ids=[rank], output_device=rank)
 
-        # get optimizer
         self.build_optimizer()
         if self.lr_decay is not None:
             self.lr_decay = torch.optim.lr_scheduler.ExponentialLR(self.optim, self.lr_decay)
@@ -482,16 +486,42 @@ class DFEncoder:
         x = torch.cat(num + bin + embeddings, dim=1)
         return x
 
-    def preprocess_data(self, df, shuffle_rows_in_batch=True, include_original_input_tensor=False):
+    def preprocess_train_data(self, df, shuffle_rows_in_batch=True):
+        """ Wrapper function round `self.preprocess_data` feeding in the args suitable for a training set."""
+        return self.preprocess_data(
+            df, 
+            shuffle_rows_in_batch=shuffle_rows_in_batch, 
+            include_original_input_tensor=False,
+            include_swapped_input_by_feature_type=False,
+        )
+
+    def preprocess_validation_data(self, df, shuffle_rows_in_batch=False):
+        """ Wrapper function round `self.preprocess_data` feeding in the args suitable for a validation set."""
+        return self.preprocess_data(
+            df, 
+            shuffle_rows_in_batch=shuffle_rows_in_batch, 
+            include_original_input_tensor=True,
+            include_swapped_input_by_feature_type=True,
+        )
+    
+    def preprocess_data(
+        self, 
+        df, 
+        shuffle_rows_in_batch, 
+        include_original_input_tensor,
+        include_swapped_input_by_feature_type,
+    ):
         """
-        Preprocesses a pandas dataFrame `df` for input into the autoencoder model. 
+        Preprocesses a pandas dataframe `df` for input into the autoencoder model. 
 
         Args:
-            df (pandas dataFrame): the input dataFrame to preprocess
-            shuffle_rows_in_batch (bool, optional): whether to shuffle the rows of the dataFrame before processing
-            include_original_input_tensor: whether to process the df into an input tensor without swapping and include 
+            df (pandas dataframe): the input dataframe to preprocess
+            shuffle_rows_in_batch (bool): whether to shuffle the rows of the dataframe before processing
+            include_original_input_tensor (bool): whether to process the df into an input tensor without swapping and include 
                 it in the returned data dict. 
                 Note. Training required only the swapped input tensor while validation can use both.
+            include_swapped_input_by_feature_type (bool): whether to process the swapped df into num/bin/cat feature tensors and include them 
+            in the returned data dict. This is useful for baseline performance evaluation for validation.
         
         Returns:
             preprocessed_data (dict): a dict containing the preprocessed input data and targets by feature type
@@ -500,17 +530,27 @@ class DFEncoder:
         if shuffle_rows_in_batch:
             df = df.sample(frac=1.0)
         df = EncoderDataFrame(df)
-        input_df = df.swap(likelihood=self.swap_p)
-        in_sample_tensor = self.build_input_tensor(input_df)
+        swapped_df = df.swap(likelihood=self.swap_p)
+        swapped_input_tensor = self.build_input_tensor(swapped_df)
         num_target, bin_target, codes = self.compute_targets(df)
+
         preprocessed_data = {
-            'input_swapped': in_sample_tensor, 
+            'input_swapped': swapped_input_tensor, 
             'num_target': num_target, 
             'bin_target': bin_target, 
-            'cat_target': codes
+            'cat_target': codes,
+            'size':len(df),
         }
+
         if include_original_input_tensor:
             preprocessed_data['input_original'] = self.build_input_tensor(df)
+
+        if include_swapped_input_by_feature_type:
+            num_swapped, bin_swapped, codes_swapped = self.compute_targets(swapped_df)
+            preprocessed_data['num_swapped'] = num_swapped
+            preprocessed_data['bin_swapped'] = bin_swapped
+            preprocessed_data['cat_swapped'] = codes_swapped
+
         return preprocessed_data
 
     def compute_loss(self, num, bin, cat, target_df, logging=True, _id=False):
@@ -756,8 +796,107 @@ class DFEncoder:
             i_loss = cce_loss[:, i]
             self.feature_loss_stats[ft] = self._create_stat_dict(i_loss)
 
+    def fit_distributed(
+        self, 
+        train_dataloader, 
+        rank, 
+        world_size, 
+        epochs=1, 
+        val_dataset=None, 
+        run_validation=False
+    ):
+        """
+        Fit the model in the distributed fashion with early stopping based on validation loss. 
+        If run_validation is True, the val_dataset will be used for validation during training 
+        and early stopping will be applied based on patience argument.
+
+        Args:
+            train_dataloader (pytorch dataloader): dataloader object of training data
+            rank (int): the rank of the current process
+            world_size (int): the total number of processes
+            epochs (int, optional): the number of epochs to train for
+            val_dataset (pytorch dataset or dataloader, optional): the validation dataset 
+                (with __iter__() that yields a batch at a time)
+            run_validation (bool, optional): whether to perform validation during training
+        """
+        if self.optim is None:
+            self.build_model(rank=rank)
+        
+        is_main_process = rank == 0
+        should_run_validation = (run_validation and val_dataset is not None)
+        if self.patience and not should_run_validation:
+            print(f'WARNING: Not going to perform early-stopping. self.patience(={self.patience}) is provided for early-stopping\
+                 but validation is not enabled. Please set `run_validation` to True and provide a `val_dataset` to enable early-stopping.')
+
+        if is_main_process and should_run_validation:
+            if self.verbose:
+                print('Validating during training. Computing baseline performance...')
+            baseline = self.compute_baseline_performance_from_dataset(val_dataset)
+
+            if isinstance(self.logger, BasicLogger):
+                self.logger.baseline_loss = baseline
+            
+            if self.verbose:
+                print(f'Baseline loss: {round(baseline, 4)}')
+            
+         # early stopping
+        count_es = 0
+        last_val_loss = float('inf')
+        should_early_stop = False
+        for epoch in range(epochs):
+            if self.verbose:
+                print(f'Rank{rank} training epoch {epoch + 1}...')
+            
+            # if we are using DistributedSampler, we have to tell it which epoch this is
+            train_dataloader.sampler.set_epoch(epoch)       
+            
+            train_loss_sum = 0
+            train_loss_count = 0
+            for data_d in train_dataloader:
+                loss = self.fit_batch(**data_d['data'])
+
+                train_loss_count += 1
+                train_loss_sum += loss
+
+            if self.lr_decay is not None:
+                self.lr_decay.step()
+
+            if is_main_process and should_run_validation:
+                # run validation
+                curr_val_loss = self.validate_dataset(val_dataset, rank)
+                if self.verbose:
+                    print(f'Rank{rank} Loss: {round(last_val_loss, 4)}->{round(curr_val_loss, 4)}')
+                
+                if self.patience: # early stopping 
+                    if curr_val_loss > last_val_loss:
+                        count_es += 1
+                        if self.verbose:
+                            print(f'Rank{rank} Loss went up. Early stop count: {count_es}')
+
+                        if count_es >= self.patience:
+                            if self.verbose:
+                                print(f'Early stopping: early stop count({count_es}) >= patience({self.patience})')
+                            should_early_stop = True
+                    else:
+                        if self.verbose:
+                            print(f'Rank{rank} Loss went down. Reset count for earlystop to 0')
+                        count_es = 0
+                
+                    last_val_loss = curr_val_loss
+
+                self.logger.end_epoch()
+            
+            # sync early stopping info so the early stopping decision can be passed from the main process to other processes
+            early_stpping_state = [None for _ in range(world_size)] # we have to create enough room to store the collected objects
+            torch.distributed.all_gather_object(early_stpping_state, should_early_stop)
+            should_early_stop_synced = early_stpping_state[0] # take the state of the main process
+            if should_early_stop_synced is True:
+                if self.verbose:
+                    print(f'Rank{rank} Early stopped.')
+                break
+
     def fit_batch(
-        self, input_swapped, num_target, bin_target, cat_target
+        self, input_swapped, num_target, bin_target, cat_target, **kwargs
     ):  
         """
         Forward pass on the input_swapped, then computes the losses from the predicted outputs and actual targets, 
@@ -788,7 +927,79 @@ class DFEncoder:
         self.optim.zero_grad()
         return net_loss
 
-    def validate_batch(self, input_original, input_swapped, num_target, bin_target, cat_target):
+    def compute_baseline_performance_from_dataset(self, val_dataset):
+        self.model.eval()
+        loss_sum = 0
+        sample_count = 0
+        with torch.no_grad():
+            for data_d in val_dataset:
+                curr_batch_size = data_d['data']['size']
+                loss = self.compute_batch_baseline_performance(**data_d['data'])
+                loss_sum += loss
+                sample_count += curr_batch_size
+
+        baseline = loss_sum / sample_count
+        return baseline
+        
+    def compute_batch_baseline_performance(
+        self, 
+        num_swapped, 
+        bin_swapped,
+        cat_swapped, 
+        num_target, 
+        bin_target, 
+        cat_target, 
+        **kwargs, # ignore other unused kwargs
+    ):
+        bin_swapped += ((bin_swapped == 0).float() * 0.05)
+        bin_swapped -= ((bin_swapped == 1).float() * 0.05)
+        codes_swapped_ohe = []
+        for cd, feature in zip(cat_swapped, self.categorical_fts.values()):
+            dim = len(feature['cats']) + 1
+            cd_ohe = ohe(cd, dim, device=self.device) * 5
+            codes_swapped_ohe.append(cd_ohe)
+        
+        _, _, _, net_loss = self.compute_loss_from_targets(
+            num=num_swapped, 
+            bin=bin_swapped, 
+            cat=codes_swapped_ohe, 
+            num_target=num_target, 
+            bin_target=bin_target, 
+            cat_target=cat_target, 
+            logging=False
+        )
+        return net_loss
+
+    def validate_dataset(self, val_dataset, rank=None):
+        """
+        Runs a validation loop on the given validation dataset, computing and returning the average loss of both the original
+        input and the input with swapped values.
+
+        Args:
+            val_dataset (torch.utils.data.Dataset): validation dataset to be used for validation
+            rank (int): optional rank of the process being used for distributed training, used only for logging
+
+        Returns:
+            float: the average loss of the original input in the validation dataset
+        """
+        self.model.eval()
+        with torch.no_grad():
+            swapped_loss = []
+            id_loss = []
+            for data_d in val_dataset:
+                orig_net_loss, net_loss = self.validate_batch(**data_d['data'])
+                id_loss.append(orig_net_loss)
+                swapped_loss.append(net_loss)
+
+            swapped_loss = np.array(swapped_loss).mean()
+            id_loss = np.array(id_loss).mean()
+
+            if self.verbose:
+                rank_str = '' if rank is None else f'R{rank} '
+                print(f'\t{rank_str}Swapped loss: {round(swapped_loss, 4)}, Orig. loss: {round(id_loss, 4)}')
+        return id_loss
+
+    def validate_batch(self, input_original, input_swapped, num_target, bin_target, cat_target, **kwargs):
         """
         Forward pass on the validation inputs, then computes the losses from the predicted outputs and actual targets, 
         and returns the net loss.
@@ -827,35 +1038,6 @@ class DFEncoder:
             logging=True,
         )
         return orig_net_loss, net_loss
-
-    def run_validation(self, val_dataset, rank=None):
-        """
-        Runs a validation loop on the given validation dataset, computing and returning the average loss of both the original
-        input and the input with swapped values.
-
-        Args:
-            val_dataset (torch.utils.data.Dataset): validation dataset to be used for validation
-            rank (int): optional rank of the process being used for distributed training, used only for logging
-
-        Returns:
-            float: the average loss of the original input in the validation dataset
-        """
-        self.model.eval()
-        with torch.no_grad():
-            swapped_loss = []
-            id_loss = []
-            for data_d in val_dataset:
-                orig_net_loss, net_loss = self.validate_batch(**data_d['data'])
-                id_loss.append(orig_net_loss)
-                swapped_loss.append(net_loss)
-
-            swapped_loss = np.array(swapped_loss).mean()
-            id_loss = np.array(id_loss).mean()
-
-            if self.verbose:
-                rank_str = '' if rank is None else f'R{rank} '
-                print(f'\t{rank_str}Swapped loss: {round(swapped_loss, 4)}, Orig. loss: {round(id_loss, 4)}')
-        return id_loss
 
     def populate_loss_stats_from_dataset(self, dataset):
         """

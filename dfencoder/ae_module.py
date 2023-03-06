@@ -222,7 +222,7 @@ class AutoEncoder(torch.nn.Module):
 class DistributedAutoEncoder(torch.nn.parallel.DistributedDataParallel):
 
     def __init__(self, *args, **kwargs):
-        # place holder attribute for the pytorch module, will be filled in the init function of the super class
+        # placeholder attribute for the pytorch module, will be populated in the init function of the super class
         self.module = None  
         super().__init__(*args, **kwargs)
     

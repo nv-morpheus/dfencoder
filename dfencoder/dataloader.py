@@ -10,9 +10,10 @@ class DFEncoderDataLoader(DataLoader):
         super().__init__(*args, **kwargs)
 
     def __iter__(self):
-        # unbatch to get rid of the first dimention of 1 intorduced by DataLoaders batching (batch size is always set to 1)
         for data_d in super().__iter__():
             if self.batch_size == 1:
+                # unbatch to get rid of the first dimention of 1 intorduced by DataLoaders batching 
+                # (if batch size is set to 1)
                 data_d["data"] = {
                     k: v[0] if type(v) != list else [_v[0] for _v in v]
                     for k, v in data_d["data"].items()
@@ -183,7 +184,7 @@ def get_distributed_training_dataloader(
     dataset = DFEncoderDataset(
         data_folder,
         model.batch_size,
-        model.preprocess_data,
+        model.preprocess_train_data,
         load_data_fn=load_data_fn,
     )
     sampler = DistributedSampler(
@@ -199,3 +200,14 @@ def get_distributed_training_dataloader(
         sampler=sampler,
     )
     return dataloader
+
+def get_validation_dataset(model, data_folder, load_data_fn, preload_data_into_memory=True):
+    dataset = DFEncoderDataset(
+        data_folder, 
+        model.eval_batch_size, 
+        model.preprocess_validation_data, 
+        load_data_fn=load_data_fn,
+        shuffle_rows_in_batch=False, 
+        preload_data_into_memory=preload_data_into_memory,
+    )
+    return dataset
