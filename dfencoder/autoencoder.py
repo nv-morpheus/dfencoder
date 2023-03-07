@@ -55,10 +55,9 @@ from collections import defaultdict
 from .dataframe import EncoderDataFrame
 from .logging import BasicLogger, IpynbLogger, TensorboardXLogger
 from .scalers import GaussRankScaler, NullScaler, StandardScaler, ModifiedScaler
-from .ae_module import AutoEncoder, DistributedAutoEncoder
+from .ae_module import AutoEncoder
+from .distributed_ae import DistributedAutoEncoder
 
-
-import json
 
 def ohe(input_vector, dim, device="cpu"):
     """Does one-hot encoding of input vector."""

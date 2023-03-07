@@ -1,6 +1,7 @@
 import torch
 from collections import OrderedDict
 
+
 def compute_embedding_size(n_categories):
     """
     Applies a standard formula to choose the number of feature embeddings
@@ -22,38 +23,38 @@ class CompleteLayer(torch.nn.Module):
         self.layers = []
         linear = torch.nn.Linear(in_dim, out_dim)
         self.layers.append(linear)
-        self.add_module('linear_layer', linear)
+        self.add_module("linear_layer", linear)
         if activation is not None:
             act = self.interpret_activation(activation)
             self.layers.append(act)
         if dropout is not None:
             dropout_layer = torch.nn.Dropout(dropout)
             self.layers.append(dropout_layer)
-            self.add_module('dropout', dropout_layer)
+            self.add_module("dropout", dropout_layer)
 
     def interpret_activation(self, act=None):
         if act is None:
             act = self.activation
         activations = {
-            'leaky_relu': torch.nn.functional.leaky_relu,
-            'relu': torch.relu,
-            'sigmoid': torch.sigmoid,
-            'tanh': torch.tanh,
-            'selu': torch.selu,
-            'hardtanh': torch.nn.functional.hardtanh,
-            'relu6': torch.nn.functional.relu6,
-            'elu': torch.nn.functional.elu,
-            'celu': torch.nn.functional.celu,
-            'rrelu': torch.nn.functional.rrelu,
-            'hardshrink': torch.nn.functional.hardshrink,
-            'tanhshrink': torch.nn.functional.tanhshrink,
-            'softsign': torch.nn.functional.softsign
+            "leaky_relu": torch.nn.functional.leaky_relu,
+            "relu": torch.relu,
+            "sigmoid": torch.sigmoid,
+            "tanh": torch.tanh,
+            "selu": torch.selu,
+            "hardtanh": torch.nn.functional.hardtanh,
+            "relu6": torch.nn.functional.relu6,
+            "elu": torch.nn.functional.elu,
+            "celu": torch.nn.functional.celu,
+            "rrelu": torch.nn.functional.rrelu,
+            "hardshrink": torch.nn.functional.hardshrink,
+            "tanhshrink": torch.nn.functional.tanhshrink,
+            "softsign": torch.nn.functional.softsign,
         }
         try:
             return activations[act]
         except:
-            msg = f'activation {act} not understood. \n'
-            msg += 'please use one of: \n'
+            msg = f"activation {act} not understood. \n"
+            msg += "please use one of: \n"
             msg += str(list(activations.keys()))
             raise Exception(msg)
 
@@ -64,18 +65,18 @@ class CompleteLayer(torch.nn.Module):
 
 
 class AutoEncoder(torch.nn.Module):
-
-    def __init__(self, 
-        verbose, 
+    def __init__(
+        self,
+        verbose,
         encoder_layers=None,
         decoder_layers=None,
         encoder_dropout=None,
         decoder_dropout=None,
         encoder_activations=None,
         decoder_activations=None,
-        activation='relu',
+        activation="relu",
         device=None,
-        *args, 
+        *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -89,16 +90,18 @@ class AutoEncoder(torch.nn.Module):
         self.activation = activation
         self.device = device
 
-        self.categorical_embedding = OrderedDict() # mapping cat features to the embedding layer
+        # mapping cat features to the embedding layer
+        self.categorical_embedding = OrderedDict()
         self.encoder = []
         self.decoder = []
         self.numeric_output = None
         self.binary_output = None
-        self.categorical_output = OrderedDict() # mapping cat features to the output layer
+        # mapping cat features to the output layer
+        self.categorical_output = OrderedDict()
 
     def build(self, numeric_fts, binary_fts, categorical_fts):
         if self.verbose:
-            print('Building model...')
+            print("Building model...")
 
         cat_input_dim = self.build_categorical_input_layers(categorical_fts)
 
@@ -119,16 +122,16 @@ class AutoEncoder(torch.nn.Module):
 
         # create categorical variable embedding layers
         for ft, feature in categorical_fts.items():
-            n_cats = len(feature['cats']) + 1
+            n_cats = len(feature["cats"]) + 1
             embed_dim = compute_embedding_size(n_cats)
             embed_layer = torch.nn.Embedding(n_cats, embed_dim)
             self.categorical_embedding[ft] = embed_layer
-            self.add_module(f'{ft}_embedding', embed_layer)
+            self.add_module(f"{ft}_embedding", embed_layer)
             # track embedding inputs
             input_dim += embed_dim
 
         return input_dim
-    
+
     def build_layers(self, input_dim):
         """
         Constructs the encoder and decoder layers for the autoencoder model.
@@ -162,17 +165,21 @@ class AutoEncoder(torch.nn.Module):
 
         for i, dim in enumerate(self.encoder_layers):
             activation = self.encoder_activations[i]
-            layer = CompleteLayer(input_dim, dim, activation=activation, dropout=self.encoder_dropout[i])
+            layer = CompleteLayer(
+                input_dim, dim, activation=activation, dropout=self.encoder_dropout[i]
+            )
             input_dim = dim
             self.encoder.append(layer)
-            self.add_module(f'encoder_{i}', layer)
+            self.add_module(f"encoder_{i}", layer)
 
         for i, dim in enumerate(self.decoder_layers):
             activation = self.decoder_activations[i]
-            layer = CompleteLayer(input_dim, dim, activation=activation, dropout=self.decoder_dropout[i])
+            layer = CompleteLayer(
+                input_dim, dim, activation=activation, dropout=self.decoder_dropout[i]
+            )
             input_dim = dim
             self.decoder.append(layer)
-            self.add_module(f'decoder_{i}', layer)
+            self.add_module(f"decoder_{i}", layer)
 
         return input_dim
 
@@ -181,16 +188,16 @@ class AutoEncoder(torch.nn.Module):
         self.binary_output = torch.nn.Linear(dim, bin_ft_cnt)
 
         for ft, feature in categorical_fts.items():
-            cats = feature['cats']
+            cats = feature["cats"]
             layer = torch.nn.Linear(dim, len(cats) + 1)
             self.categorical_output[ft] = layer
-            self.add_module(f'{ft}_output', layer)
-    
+            self.add_module(f"{ft}_output", layer)
+
     def forward(self, input):
         encoding = self.encode(input)
         num, bin, cat = self.decode(encoding)
         return num, bin, cat
-    
+
     def encode(self, x, layers=None):
         if layers is None:
             layers = len(self.encoder)
@@ -217,17 +224,3 @@ class AutoEncoder(torch.nn.Module):
             out = output_layer(x)
             cat.append(out)
         return num, bin, cat
-
-
-class DistributedAutoEncoder(torch.nn.parallel.DistributedDataParallel):
-
-    def __init__(self, *args, **kwargs):
-        # placeholder attribute for the pytorch module, will be populated in the init function of the super class
-        self.module = None  
-        super().__init__(*args, **kwargs)
-    
-    def __getattr__(self, name: str):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.module, name)
