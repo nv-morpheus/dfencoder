@@ -151,7 +151,7 @@ class DFEncoder:
         self.binary_output = None
 
         self.num_names = []
-        self.bin_names = binary_feature_list or []
+        self.bin_names = binary_feature_list
 
         self.amsgrad = amsgrad
         self.momentum = momentum
