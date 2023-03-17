@@ -802,12 +802,14 @@ class DFEncoder:
         world_size, 
         epochs=1, 
         val_dataset=None, 
-        run_validation=False
+        run_validation=False,
+        use_val_for_loss_stats=True,
     ):
         """
         Fit the model in the distributed fashion with early stopping based on validation loss. 
         If run_validation is True, the val_dataset will be used for validation during training 
         and early stopping will be applied based on patience argument.
+        * NOTE. A big difference between the distributed version of the fit() function  
 
         Args:
             train_dataloader (pytorch dataloader): dataloader object of training data
@@ -817,7 +819,24 @@ class DFEncoder:
             val_dataset (pytorch dataset or dataloader, optional): the validation dataset 
                 (with __iter__() that yields a batch at a time)
             run_validation (bool, optional): whether to perform validation during training
+            use_val_for_loss_stats (bool, optional): whether to populate loss stats in the 
+                main process (rank 0) for z-score calculation using the validation set. 
+                If set to False, loss stats would be populated using the train_dataloader,
+                which can be slow due to data size.
+                `True` is the default as using the validation set to populate loss stats is
+                strongly recommended (for both efficiency and model efficacy). 
         """
+        if run_validation and val_dataset is None:
+            raise ValueError(
+                "`run_validation` is set to True but the validation set (val_dataset) is not provided."
+            )
+
+        if use_val_for_loss_stats and val_dataset is None:
+            raise ValueError(
+                "Validation set is required if either run_validation or \
+                use_val_for_loss_stats is set to True."
+            )
+
         if self.optim is None:
             self.build_model(rank=rank)
         
@@ -893,6 +912,10 @@ class DFEncoder:
                 if self.verbose:
                     print(f'Rank{rank} Early stopped.')
                 break
+        
+        if is_main_process:
+            dataset_for_loss_stats = val_dataset if use_val_for_loss_stats else train_dataloader
+            self.populate_loss_stats_from_dataset(dataset_for_loss_stats)
 
     def fit_batch(
         self, input_swapped, num_target, bin_target, cat_target, **kwargs
