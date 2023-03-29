@@ -1,3 +1,7 @@
+## :warning: **Note:** Repository Has Been Archived :warning:
+
+This repo has been archived and is now read only. The functionality has been moved into the Morpheus [repo](https://github.com/nv-morpheus/Morpheus). You can find the new implementation of the `AutoEncoder` class inside the `morpheus.models.dfencoder` module located [here](https://github.com/nv-morpheus/Morpheus/blob/branch-23.03/morpheus/models/dfencoder/autoencoder.py).
+
 # dfencoder - AutoEncoders for DataFrames
 
 Want to learn useful nonlinear representations of your tabular data? Don't have time to mess with autoencoders? This library aims to simplify your life.<br><br>
